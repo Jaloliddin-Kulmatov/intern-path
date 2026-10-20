@@ -78,7 +78,7 @@ const FIELDS = [
   "Cloud & DevOps", "QA & Testing", "Business & IT Analysis", "Networking & Support",
 ];
 
-const REGIONS = ["Kuala Lumpur", "Selangor", "Penang", "Johor", "Remote"];
+const REGIONS = ["Kuala Lumpur", "Selangor", "Penang", "Johor", "Remote", "Other"];
 const MODES = ["Any", "On-site", "Hybrid", "Remote"];
 const LANGUAGES = [
   "English", "Bahasa Malaysia", "Mandarin", "Cantonese", "Tamil",
@@ -106,6 +106,7 @@ const SOURCES = {
     search: q => `https://my.indeed.com/jobs?q=${encodeURIComponent(q)}&l=Malaysia` },
   glints: { name: "Glints", color: "#c2410c",
     search: q => `https://glints.com/my/opportunities/jobs/explore?keyword=${encodeURIComponent(q)}&country=MY` },
+  direct: { name: "Company site", color: "#475569", search: () => "#" },
 };
 
 /* id, title, company, city, region, mode, allowance (MYR/month), months, field, required skills,

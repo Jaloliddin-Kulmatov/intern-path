@@ -13,11 +13,77 @@
   const ago = d => d === 0 ? "Today" : d === 1 ? "Yesterday" : `${d} days ago`;
   const initials = n => (n || "?").split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0]).join("").toUpperCase();
 
-  /* ---------- state (localStorage with in-memory fallback) ---------- */
-  const KEY = "internpath.v1";
-  const loadState = () => { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch { return {}; } };
-  const state = Object.assign({ user: null, profile: null, saved: [], clicks: [], synced: false, syncedAt: null, theme: null }, loadState());
-  const persist = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch { /* storage blocked: stay in memory */ } };
+  /* ---------- state ----------
+     Signed-in users (Google) are stored in Supabase. Only the theme and the offline *demo* session
+     use localStorage (with an in-memory fallback if storage is blocked). */
+  const KEY = "internpath.v2";
+  const loadStored = () => { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch { return {}; } };
+  const stored = loadStored();
+  const state = { user: null, profile: null, saved: [], clicks: [], synced: false, syncedAt: null, theme: stored.theme ?? null, authError: "" };
+  if (stored.demo?.user?.demo) Object.assign(state, stored.demo);
+  const persist = () => {
+    const demo = state.user?.demo ? { user: state.user, profile: state.profile, saved: state.saved, clicks: state.clicks, synced: state.synced, syncedAt: state.syncedAt } : null;
+    try { localStorage.setItem(KEY, JSON.stringify({ theme: state.theme, demo })); } catch { /* storage blocked: stay in memory */ }
+  };
+
+  /* ---------- Supabase ---------- */
+  const CFG = window.INTERNPATH || {};
+  const sb = window.supabase && CFG.supabaseUrl && CFG.supabaseKey
+    ? window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseKey, { auth: { flowType: "pkce", detectSessionInUrl: true, persistSession: true, autoRefreshToken: true } })
+    : null;
+  const live = () => !!(sb && state.user && !state.user.demo);
+  const canGoogle = () => !!sb && /^https?:$/.test(location.protocol);
+  const todayMY = () => new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
+  const dayDiff = (a, b) => Math.round((Date.parse(a) - Date.parse(b)) / 864e5);
+
+  /* Listings: loaded from the database; the bundled sample list is the offline/demo fallback. */
+  const localCatalog = JOBS.map(j => ({ ...j, deadlineDays: 10 + (j.id * 7) % 50 }));
+  let catalog = localCatalog, catalogLive = false, lastChecked = null;
+  const fromRow = r => ({ id: r.id, title: r.title, company: r.company, city: r.city, region: r.region, mode: r.mode, allow: r.allowance, months: r.months,
+    cat: r.category, skills: r.skills, nice: r.nice, langs: r.langs, intl: r.intl, src: r.source, days: Math.max(0, dayDiff(todayMY(), r.posted_at)),
+    desc: r.description, url: r.url, pending: false, deadline: r.deadline, deadlineDays: r.deadline ? dayDiff(r.deadline, todayMY()) : null, checkedAt: r.checked_at });
+  async function loadCatalog() {
+    if (!sb) return false;
+    const { data, error } = await sb.from("internships").select("*").order("id");
+    if (error || !data) return false;
+    catalog = data.map(fromRow); catalogLive = true;
+    lastChecked = data.reduce((m, r) => (r.checked_at > m ? r.checked_at : m), "") || null;
+    return true;
+  }
+
+  const profileRow = p => ({ name: p.name, type: p.type, nationality: p.nationality, year: p.year, track: p.track, cv_name: p.cvName, linkedin: p.linkedin,
+    skills: p.skills, fields: p.fields, regions: p.regions, mode: p.mode, langs: p.langs });
+  const profileFromRow = r => ({ name: r.name, type: r.type, nationality: r.nationality, year: r.year, track: r.track, cvName: r.cv_name, linkedin: r.linkedin,
+    skills: r.skills, fields: r.fields, regions: r.regions, mode: r.mode, langs: r.langs });
+
+  async function applySession(session) {
+    if (!session) return false;
+    const { data: row } = await sb.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
+    if (!row) {
+      await sb.auth.signOut();
+      state.authError = "That account isn't allowed. Sign in with your @siswa.um.edu.my (student) or @um.edu.my (staff) Google account.";
+      return false;
+    }
+    state.user = { id: row.id, email: row.email, role: row.role, name: row.name || nameFromEmail(row.email), demo: false };
+    state.profile = null; state.saved = []; state.clicks = [];
+    if (row.role === "student") {
+      state.profile = profileFromRow(row);
+      const [s, c] = await Promise.all([sb.from("saved_internships").select("internship_id"), sb.from("apply_clicks").select("internship_id")]);
+      state.saved = (s.data || []).map(x => x.internship_id);
+      state.clicks = (c.data || []).map(x => ({ id: x.internship_id }));
+    }
+    return true;
+  }
+  async function signInWithGoogle() {
+    try { sessionStorage.setItem("ip_login", "1"); } catch { /* ignore */ }
+    const { error } = await sb.auth.signInWithOAuth({ provider: "google", options: { redirectTo: location.origin + location.pathname, queryParams: { prompt: "select_account" } } });
+    if (error) toast(error.message);
+  }
+  async function signOut() {
+    if (live()) await sb.auth.signOut();
+    Object.assign(state, { user: null, profile: null, saved: [], clicks: [], synced: false, syncedAt: null });
+    persist(); toast("Signed out"); go("/");
+  }
 
   const blankProfile = () => ({ name: "", type: "malaysian", nationality: "", year: "", track: "", cvName: "", linkedin: "",
     skills: [], fields: [], regions: [], mode: "Any", langs: ["English"] });
@@ -76,7 +142,8 @@
   }
 
   /* ---------- matching engine ---------- */
-  const activeJobs = () => JOBS.filter(j => !j.pending || state.synced);
+  const activeJobs = () => catalog.filter(j => (!j.pending || state.synced) && (j.deadlineDays == null || j.deadlineDays >= 0));
+  const closesText = d => d == null ? "" : d <= 0 ? "Closes today" : d === 1 ? "Closes tomorrow" : `Closes in ${d} days`;
 
   function scoreJob(job, p) {
     const have = new Set(p.skills);
@@ -118,9 +185,19 @@
   function mulberry32(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
   const OWN = { Python: .55, Java: .42, JavaScript: .38, SQL: .46, "HTML/CSS": .36, Git: .4, Communication: .5, Excel: .3, React: .2, "Node.js": .15,
     "Machine Learning": .18, "Data Analysis": .2, Pandas: .16, Linux: .18, Networking: .14, "C#": .1, Docker: .08, AWS: .06, Figma: .1, "UI/UX Design": .08 };
-  let cohortCache = null;
+  let cohortCache = null, adminRows = null;
+  function liveCohort(rows) {
+    const jobs = activeJobs(), now = Date.now();
+    return rows.map(r => {
+      const p = { type: r.type, skills: r.skills, fields: r.fields, regions: r.regions, langs: r.langs };
+      const ms = r.skills.length ? jobs.map(j => scoreJob(j, p)).filter(m => m.eligible && m.score >= 60) : [];
+      const weeksAgo = Math.floor((now - Date.parse(r.created_at)) / 6048e5);
+      return { ...p, hasCv: r.has_cv, matches: ms.length, clicks: r.clicks, week: weeksAgo < 8 ? 7 - weeksAgo : -1 };
+    });
+  }
   function cohort() {
-    if (cohortCache) return cohortCache;
+    if (live() && adminRows) return (cohortCache = liveCohort(adminRows));
+    if (cohortCache && !live()) return cohortCache;
     const rnd = mulberry32(2026), jobs = activeJobs(), N = 148, out = [];
     const pick = (arr, k) => { const a = [...arr], r = []; while (r.length < k && a.length) r.push(a.splice(Math.floor(rnd() * a.length), 1)[0]); return r; };
     for (let i = 0; i < N; i++) {
@@ -171,7 +248,7 @@
       </div></nav></div>`;
     $("#nav-toggle").onclick = e => { const o = $("#nav").classList.toggle("open"); e.currentTarget.setAttribute("aria-expanded", o); };
     $("#theme-btn").onclick = () => { state.theme = isDark() ? "light" : "dark"; persist(); applyTheme(); renderHeader(route); };
-    $("#signout")?.addEventListener("click", () => { state.user = null; persist(); toast("Signed out"); go("/"); });
+    $("#signout")?.addEventListener("click", signOut);
   }
   $("#site-footer").innerHTML = `<div class="wrap">
     <div><strong>Intern_Path</strong> — a WIA2006 project by team <strong>ICOM</strong> (OCC 1M)<br>Faculty of Computer Science &amp; Information Technology, Universiti Malaya</div>
@@ -242,16 +319,16 @@
       <a class="btn btn-accent btn-lg" href="#/login">Get started</a></div></div></section>`;
   }
 
+  const GOOGLE_G = `<svg width="20" height="20" viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.9 6.1C12.4 13.6 17.7 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.8 7.2l7.5 5.8c4.4-4.1 7.1-10.1 7.1-17.5z"/><path fill="#FBBC05" d="M10.5 28.7a14.5 14.5 0 010-9.4l-7.9-6.1a24 24 0 000 21.6l7.9-6.1z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.5-5.8c-2.1 1.4-4.9 2.3-8.4 2.3-6.3 0-11.6-4.1-13.5-9.8l-7.9 6.1C6.5 42.6 14.6 48 24 48z"/></svg>`;
   function viewLogin() {
+    const ok = canGoogle();
     return `<div class="wrap auth">
-      <section><h1>Sign in</h1><p class="muted">Use your UM email. Students use <b>@siswa.um.edu.my</b>; faculty staff use <b>@um.edu.my</b>.</p>
-        <form id="login-form" novalidate>
-          <label class="field">UM email<input type="email" id="email" autocomplete="email" placeholder="name@siswa.um.edu.my" required aria-describedby="email-err"></label>
-          <div class="err" id="email-err" role="alert"></div>
-          <button class="btn btn-primary btn-lg" type="submit">Continue</button>
-        </form>
-        <p class="hint" style="margin-top:14px">Prototype: there is no password. The real system would verify your UM email by sending a one-time link.</p></section>
-      <aside class="card"><h2 style="font-size:1.1rem">Just exploring?</h2><p class="muted" style="font-size:.92rem">Jump in with a ready-made demo account.</p>
+      <section><h1>Sign in</h1><p class="muted">Sign in with your UM Google account. Students use <b>@siswa.um.edu.my</b>; faculty staff use <b>@um.edu.my</b>. Other accounts are not accepted.</p>
+        ${state.authError ? `<div class="note" role="alert" style="margin-top:16px;background:var(--danger-bg);border-color:var(--danger)">${esc(state.authError)}</div>` : ""}
+        <div style="margin-top:20px"><button class="btn btn-ghost btn-lg" id="google-btn" ${ok ? "" : "disabled"} style="gap:12px;width:100%;justify-content:center;background:var(--surface)">${GOOGLE_G} Continue with Google</button></div>
+        ${ok ? "" : `<p class="hint" style="margin-top:12px">${sb ? "Google sign-in needs the site to be opened from a web address (https:// or http://localhost), not as a local file." : "The sign-in service could not be loaded. Check your internet connection and reload."} Demo accounts below still work.</p>`}
+        <p class="hint" style="margin-top:14px">Your profile, saved internships and applications are stored securely in your account, so they follow you to any device.</p></section>
+      <aside class="card"><h2 style="font-size:1.1rem">Just exploring?</h2><p class="muted" style="font-size:.92rem">Try a demo account — nothing is saved to the database.</p>
         <div class="demo-list">
           <button class="btn btn-ghost demo-btn" data-demo="malaysian">🇲🇾 Aisyah — Malaysian student<small>Year 3 · Software Engineering</small></button>
           <button class="btn btn-ghost demo-btn" data-demo="international">🌏 Timur — International student<small>Year 2 · Data Science · from Uzbekistan</small></button>
@@ -259,16 +336,36 @@
         </div></aside></div>`;
   }
 
-  function nameFromEmail(e) {
+  function nameFromEmail(e = "") {
     const n = e.split("@")[0].replace(/[._\-\d]+/g, " ").trim();
     return n ? n.replace(/\b\w/g, c => c.toUpperCase()) : "Student";
   }
-  function signIn(user) {
-    state.user = { email: user.email, role: user.role, name: user.profile?.name || nameFromEmail(user.email) };
-    if (user.role === "student") state.profile = user.profile ? structuredClone(user.profile) : (state.profile ?? { ...blankProfile(), name: state.user.name });
-    persist();
-    toast(`Welcome, ${state.user.name.split(" ")[0]}!`);
-    go(user.role === "staff" ? "/admin" : state.profile.skills.length ? "/matches" : "/profile");
+  function signInDemo(user) {  // offline demo: nothing is sent to the database
+    Object.assign(state, { user: { email: user.email, role: user.role, name: user.profile?.name || nameFromEmail(user.email), demo: true },
+      profile: user.profile ? structuredClone(user.profile) : null, saved: [], clicks: [], synced: false, syncedAt: null });
+    cohortCache = null; persist();
+    toast(`Demo mode — welcome, ${state.user.name.split(" ")[0]}!`);
+    go(user.role === "staff" ? "/admin" : "/matches");
+  }
+
+  /* ---------- writes (database when signed in with Google, localStorage in demo mode) ---------- */
+  async function saveProfile(p) {
+    if (live()) { const { error } = await sb.from("profiles").update(profileRow(p)).eq("id", state.user.id); if (error) throw error; }
+    state.profile = p; state.user.name = p.name || state.user.name; persist();
+  }
+  async function toggleSaved(id) {
+    const had = state.saved.includes(id);
+    state.saved = had ? state.saved.filter(x => x !== id) : [...state.saved, id]; persist();
+    if (!live()) return;
+    const q = had ? sb.from("saved_internships").delete().eq("user_id", state.user.id).eq("internship_id", id)
+                  : sb.from("saved_internships").insert({ user_id: state.user.id, internship_id: id });
+    const { error } = await q;
+    if (error) { state.saved = had ? [...state.saved, id] : state.saved.filter(x => x !== id); renderResults(); toast("Could not save — try again"); }
+  }
+  async function recordClick(id) {
+    if (state.clicks.some(c => c.id === id)) return;
+    state.clicks.push({ id }); persist();
+    if (live()) await sb.from("apply_clicks").upsert({ user_id: state.user.id, internship_id: id }, { onConflict: "user_id,internship_id", ignoreDuplicates: true });
   }
 
   function viewProfile() {
@@ -322,7 +419,10 @@
   }
 
   /* matches view state */
-  const mf = { q: "", src: "", region: "", mode: "", min: 0, paid: false, saved: false, showIneligible: false };
+  const mf = { q: "", src: "", region: "", mode: "", min: 0, sort: "match", paid: false, saved: false, showIneligible: false };
+  const syncText = () => catalogLive
+    ? `Collected automatically twice a day (8:00 and 20:00 Malaysia time)${lastChecked ? " · last check " + new Date(lastChecked).toLocaleString("en-MY", { dateStyle: "medium", timeStyle: "short" }) : ""}. Closed listings disappear at their deadline.`
+    : state.syncedAt ? "Last synced " + new Date(state.syncedAt).toLocaleString("en-MY", { dateStyle: "medium", timeStyle: "short" }) : "Showing the latest saved offers. Sync to fetch new ones.";
 
   function viewMatches() {
     const p = state.profile, intl = p.type === "international";
@@ -331,9 +431,9 @@
     return `<div class="wrap">
       <div class="page-head"><div><p class="eyebrow">Step 2 of 2</p><h1>Your matches</h1><p class="muted" id="match-summary"></p></div>
         <a class="btn btn-ghost" href="#/profile">Edit profile</a></div>
-      <div class="card sync-card"><div><strong>Internship collection</strong><div class="hint" id="sync-status">${state.syncedAt ? "Last synced " + new Date(state.syncedAt).toLocaleString("en-MY", { dateStyle: "medium", timeStyle: "short" }) : "Showing the latest saved offers. Sync to fetch new ones."}</div></div>
-        <div class="src-list" id="src-list">${Object.entries(SOURCES).map(([id, s]) => `<span><i class="dot ${state.synced ? "ok" : ""}" data-dot="${id}"></i>${s.name}</span>`).join("")}</div>
-        <button class="btn btn-primary btn-sm" id="sync-btn" style="margin-left:auto">⟳ Sync now</button></div>
+      <div class="card sync-card"><div><strong>Internship collection</strong><div class="hint" id="sync-status">${syncText()}</div></div>
+        <div class="src-list" id="src-list">${Object.entries(SOURCES).filter(([id]) => id !== "direct").map(([id, s]) => `<span><i class="dot ${state.synced || catalogLive ? "ok" : ""}" data-dot="${id}"></i>${s.name}</span>`).join("")}</div>
+        <button class="btn btn-primary btn-sm" id="sync-btn" style="margin-left:auto">${catalogLive ? "⟳ Refresh" : "⟳ Sync now"}</button></div>
       ${intl ? `<details class="callout" style="margin-top:16px"><summary>Before you apply — checklist for international students</summary><ul class="checklist">
         <li>Ask your faculty’s industrial-training coordinator whether this internship counts towards your programme.</li>
         <li>Check with the university’s international student office and the Immigration Department of Malaysia whether your Student Pass allows the placement — rules can change, so confirm the current requirements.</li>
@@ -344,6 +444,7 @@
         <select id="f-region" aria-label="Location"><option value="">All locations</option>${REGIONS.map(r => `<option>${r}</option>`).join("")}</select>
         <select id="f-mode" aria-label="Work mode"><option value="">Any mode</option>${MODES.slice(1).map(m => `<option>${m}</option>`).join("")}</select>
         <select id="f-min" aria-label="Minimum match"><option value="0">Any match</option><option value="40">40%+</option><option value="60">60%+</option><option value="75">75%+</option></select>
+        <select id="f-sort" aria-label="Sort by"><option value="match">Best match</option><option value="closing">Closing soon</option><option value="new">Newest</option></select>
       </form>
       <div class="toggles"><label><input type="checkbox" id="f-paid"> Paid only</label><label><input type="checkbox" id="f-saved"> Saved only</label>
         ${intl ? `<label><input type="checkbox" id="f-inel"><span>Also show roles for Malaysian citizens only (<span id="inel-count">0</span>)</span></label>` : ""}</div>
@@ -355,9 +456,9 @@
     const w = m.parts;
     return `<article class="card job" data-id="${j.id}">
       <div><h3>${esc(j.title)}</h3><p class="co">${esc(j.company)} · ${esc(j.city)}</p>
-        <div class="tags">${srcTag(j.src)}<span class="tag">${j.mode}</span><span class="tag">${rm(j.allow)}/mo</span><span class="tag">${j.months} months</span><span class="tag">${ago(j.days)}</span>
+        <div class="tags">${srcTag(j.src)}<span class="tag">${j.mode}</span><span class="tag">${rm(j.allow)}/mo</span><span class="tag">${j.months} months</span><span class="tag">${ago(j.days)}</span>${j.deadlineDays != null ? `<span class="tag ${j.deadlineDays <= 7 ? "warn" : ""}" title="${esc(j.deadline || "")}">⏳ ${closesText(j.deadlineDays)}</span>` : ""}
           ${j.intl ? '<span class="tag intl">🌏 Open to international students</span>' : '<span class="tag warn">🇲🇾 Malaysian citizens only</span>'}
-          ${j.langs.map(l => `<span class="tag">Needs ${esc(l)}</span>`).join("")}${j.pending && state.synced ? '<span class="tag good">New</span>' : ""}</div>
+          ${j.langs.map(l => `<span class="tag">Needs ${esc(l)}</span>`).join("")}${(j.pending && state.synced) || (catalogLive && j.days === 0) ? '<span class="tag good">New</span>' : ""}</div>
         <p class="desc">${esc(j.desc)}</p>
         <div class="skills-row"><span class="lbl">You have</span>${m.matched.length ? m.matched.map(s => `<span class="sk have">${esc(s)}</span>`).join("") : '<span class="hint">No listed skills yet</span>'}</div>
         ${m.missing.length || m.missingNice.length ? `<div class="skills-row"><span class="lbl">To learn</span>${m.missing.map(s => `<span class="sk miss" title="Required">${esc(s)}</span>`).join("")}${m.missingNice.map(s => `<span class="sk miss" title="Nice to have" style="opacity:.7">${esc(s)}</span>`).join("")}</div>` : ""}
@@ -388,6 +489,8 @@
     });
     const hidden = base.filter(m => !m.eligible);
     const shown = base.filter(m => m.eligible || mf.showIneligible);
+    if (mf.sort === "closing") shown.sort((a, b) => (a.job.deadlineDays ?? 999) - (b.job.deadlineDays ?? 999) || b.score - a.score);
+    else if (mf.sort === "new") shown.sort((a, b) => a.job.days - b.job.days || b.score - a.score);
     const strong = all.filter(m => m.eligible && m.score >= 75).length;
     $("#match-summary").textContent = `${all.filter(m => m.eligible).length} internships you can apply to · ${strong} strong matches (75%+)`;
     const ic = $("#inel-count"); if (ic) ic.textContent = hidden.length;
@@ -397,6 +500,14 @@
 
   async function runSync(btn) {
     btn.disabled = true;
+    if (catalogLive) {  // real data is collected on the server twice a day; this just re-reads it
+      const before = new Set(catalog.map(j => j.id));
+      await loadCatalog();
+      const fresh = catalog.filter(j => !before.has(j.id)).length;
+      if (location.hash.startsWith("#/matches")) render();
+      toast(fresh ? `${fresh} new internships found` : `Up to date — ${activeJobs().length} open internships`);
+      return;
+    }
     const status = $("#sync-status");
     for (const id of Object.keys(SOURCES)) {
       const dot = $(`[data-dot="${id}"]`); dot.className = "dot busy";
@@ -404,7 +515,7 @@
       await sleep(420);
       dot.className = "dot ok";
     }
-    const fresh = state.synced ? 0 : JOBS.filter(j => j.pending).length;
+    const fresh = state.synced ? 0 : catalog.filter(j => j.pending).length;
     state.synced = true; state.syncedAt = Date.now(); persist();
     if (location.hash.startsWith("#/matches")) { render(); }
     toast(fresh ? `${fresh} new internships added` : "Already up to date — no new offers");
@@ -433,7 +544,7 @@
     const s = adminStats(), maxSrc = Math.max(...s.bySrc.map(x => x[1])), maxReg = Math.max(...s.byReg.map(x => x[1])), maxW = Math.max(...s.weeks, 1);
     const myPct = s.pct(s.my.length, s.n);
     return `<div class="wrap">
-      <div class="page-head"><div><p class="eyebrow">Faculty staff</p><h1>Usage &amp; match reports</h1><p class="muted">Simulated cohort of ${s.n} students — prototype data, not real students.</p></div>
+      <div class="page-head"><div><p class="eyebrow">Faculty staff</p><h1>Usage &amp; match reports</h1><p class="muted">${live() ? (s.n ? `Live data from ${s.n} registered student${s.n === 1 ? "" : "s"} — anonymised, no names or emails.` : "No students have signed up yet — numbers appear as soon as they do.") : `Simulated cohort of ${s.n} students — demo data, not real students.`}</p></div>
         <button class="btn btn-ghost" id="export">⭳ Export CSV</button></div>
       <div class="kpis">
         <div class="card kpi"><div class="v">${s.n}</div><div class="l">Registered students</div><div class="s">${s.my.length} Malaysian · ${s.intl.length} international</div></div>
@@ -450,6 +561,10 @@
           <p class="hint" style="margin-top:10px">International students see fewer eligible roles because some employers accept Malaysian citizens only.</p></section>
         <section class="card"><h2>New sign-ups per week</h2><p class="sub">Last 8 weeks (oldest → newest).</p>
           <div class="cols" role="img" aria-label="Weekly sign-ups">${s.weeks.map((v, i) => `<div><span>${v}</span><i style="height:${100 * v / maxW * .8}%"></i><span>W${i + 1}</span></div>`).join("")}</div></section>
+        <section class="card span-2"><h2>Collection &amp; deadlines</h2><p class="sub">${catalogLive ? "Listings are collected automatically twice a day (8:00 and 20:00 Malaysia time)." : "Demo data — connect the database for automatic collection."} A listing is hidden the moment its deadline passes and deleted 7 days later.</p>
+          <div class="kpis" style="grid-template-columns:repeat(3,1fr)"><div><div class="v" style="font-size:1.6rem">${s.jobs.length}</div><div class="l">Open offers</div></div>
+            <div><div class="v" style="font-size:1.6rem">${s.jobs.filter(j => j.deadlineDays != null && j.deadlineDays <= 7).length}</div><div class="l">Closing within 7 days</div></div>
+            <div><div class="v" style="font-size:1.6rem">${s.jobs.filter(j => j.days === 0).length}</div><div class="l">Added today</div></div></div></section>
         <section class="card"><h2>Offers collected by source</h2><p class="sub">Active internship offers in the system.</p>
           <div class="bars">${barRows(s.bySrc.map(([k, v]) => [SOURCES[k].name, v]), maxSrc, v => v, l => Object.values(SOURCES).find(x => x.name === l).color)}</div></section>
         <section class="card"><h2>Offers by location</h2><p class="sub">Where internships are available.</p>
@@ -477,7 +592,9 @@
   const go = path => { if (location.hash === "#" + path) render(); else location.hash = path; };
   const GUARD = { "/profile": "student", "/matches": "student", "/admin": "staff" };
 
+  let ready = false;
   function render() {
+    if (!ready) return;
     let route = location.hash.replace(/^#/, "") || "/";
     if (!["/", "/login", "/profile", "/matches", "/admin"].includes(route)) route = "/";
     const need = GUARD[route];
@@ -485,6 +602,17 @@
     else if (need && state.user.role !== need) { route = state.user.role === "staff" ? "/admin" : "/matches"; history.replaceState(null, "", "#" + route); }
     else if (route === "/login" && state.user) { route = state.user.role === "staff" ? "/admin" : "/matches"; history.replaceState(null, "", "#" + route); }
     if (route === "/profile" && !state.profile) state.profile = blankProfile();
+
+    if (route !== "/admin") adminRows = null;
+    if (route === "/admin" && live() && !adminRows) {  // staff reports: fetch anonymised rows first
+      renderHeader(route);
+      $("#app").innerHTML = '<div class="wrap"><p class="muted" style="padding:60px 0">Loading reports…</p></div>';
+      sb.rpc("admin_students").then(({ data, error }) => {
+        if (error) toast("Could not load reports: " + error.message);
+        adminRows = error ? [] : data; render();
+      });
+      return;
+    }
 
     document.title = { "/": "Intern_Path — Internships in Malaysia", "/login": "Sign in — Intern_Path", "/profile": "My profile — Intern_Path", "/matches": "My matches — Intern_Path", "/admin": "Reports — Intern_Path" }[route];
     renderHeader(route);
@@ -501,17 +629,8 @@
   }
 
   function bindLogin() {
-    $("#login-form").onsubmit = e => {
-      e.preventDefault();
-      const email = $("#email").value.trim().toLowerCase(), err = $("#email-err");
-      const role = /^[^\s@]+@siswa\.um\.edu\.my$/.test(email) ? "student" : /^[^\s@]+@um\.edu\.my$/.test(email) ? "staff" : null;
-      $("#email").setAttribute("aria-invalid", !role);
-      if (!role) { err.textContent = "Please use your UM email (…@siswa.um.edu.my for students)."; return; }
-      err.textContent = "";
-      const returning = state.profile && state.user?.email === email;
-      signIn({ email, role, profile: returning ? state.profile : null });
-    };
-    $$("[data-demo]").forEach(b => b.onclick = () => signIn(DEMO[b.dataset.demo]));
+    $("#google-btn").onclick = e => { e.currentTarget.disabled = true; state.authError = ""; signInWithGoogle(); };
+    $$("[data-demo]").forEach(b => b.onclick = () => signInDemo(DEMO[b.dataset.demo]));
   }
 
   function bindProfile() {
@@ -547,13 +666,14 @@
     ["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("over"); }));
     drop.addEventListener("drop", e => handleFile(e.dataTransfer.files[0]));
 
-    form.onsubmit = e => {
+    form.onsubmit = async e => {
       e.preventDefault();
       const p = readProfileForm(form), li = $("#li-err"), liInput = form.elements.linkedin;
       if (p.linkedin && !LINKEDIN_RE.test(p.linkedin)) { liInput.setAttribute("aria-invalid", "true"); li.textContent = "Use a link like https://www.linkedin.com/in/your-name"; liInput.focus(); return; }
       if (p.linkedin && !/^https?:\/\//i.test(p.linkedin)) p.linkedin = "https://" + p.linkedin;
       if (!p.name) { form.elements.name.focus(); toast("Please enter your name"); return; }
-      state.profile = p; state.user.name = p.name; persist();
+      const btn = $('button[form="profile-form"]'); btn.disabled = true;
+      try { await saveProfile(p); } catch (err) { btn.disabled = false; toast("Could not save your profile: " + (err.message || "try again")); return; }
       toast(p.skills.length ? "Profile saved" : "Profile saved — add some skills to get matches");
       go(p.skills.length ? "/matches" : "/profile");
     };
@@ -567,24 +687,23 @@
     on("#f-region", "change", e => { mf.region = e.target.value; renderResults(); });
     on("#f-mode", "change", e => { mf.mode = e.target.value; renderResults(); });
     on("#f-min", "change", e => { mf.min = +e.target.value; renderResults(); });
+    on("#f-sort", "change", e => { mf.sort = e.target.value; renderResults(); });
     on("#f-paid", "change", e => { mf.paid = e.target.checked; renderResults(); });
     on("#f-saved", "change", e => { mf.saved = e.target.checked; renderResults(); });
     on("#f-inel", "change", e => { mf.showIneligible = e.target.checked; renderResults(); });
     // restore filter UI after a re-render (e.g. after sync)
-    $("#f-q").value = mf.q; $("#f-src").value = mf.src; $("#f-region").value = mf.region; $("#f-mode").value = mf.mode; $("#f-min").value = mf.min;
+    $("#f-q").value = mf.q; $("#f-src").value = mf.src; $("#f-region").value = mf.region; $("#f-mode").value = mf.mode; $("#f-min").value = mf.min; $("#f-sort").value = mf.sort;
     $("#f-paid").checked = mf.paid; $("#f-saved").checked = mf.saved; if ($("#f-inel")) $("#f-inel").checked = mf.showIneligible;
     on("#sync-btn", "click", e => runSync(e.currentTarget));
     $("#results").addEventListener("click", e => {
       const a = e.target.closest("[data-apply]"), s = e.target.closest("[data-save]");
       if (a) {
-        const id = +a.dataset.apply;
-        if (!state.clicks.some(c => c.id === id)) { state.clicks.push({ id, t: Date.now() }); persist(); }
+        recordClick(+a.dataset.apply);
         setTimeout(() => { a.textContent = "Open again ↗"; }, 0);
       }
       if (s) {
-        const id = +s.dataset.save, i = state.saved.indexOf(id);
-        if (i >= 0) state.saved.splice(i, 1); else state.saved.push(id);
-        persist(); const open = $$("details.why-match[open]").map(d => d.closest(".job").dataset.id);
+        const id = +s.dataset.save;
+        toggleSaved(id); const open = $$("details.why-match[open]").map(d => d.closest(".job").dataset.id);
         renderResults(); open.forEach(i => $(`.job[data-id="${i}"] details.why-match`)?.setAttribute("open", ""));
         $(`[data-save="${id}"]`)?.focus();
       }
@@ -597,5 +716,36 @@
   /* ---------- boot ---------- */
   applyTheme();
   addEventListener("hashchange", render);
-  render();
+  $("#app").innerHTML = '<div class="wrap"><p class="muted" style="padding:80px 0">Loading…</p></div>';
+
+  // Google sends failures back in the URL (e.g. when the account is not a UM address).
+  const urlErr = new URLSearchParams(location.search).get("error_description") || new URLSearchParams(location.hash.replace(/^#\/?/, "")).get("error_description");
+  if (urlErr) {
+    state.authError = /database error|not allowed|signup/i.test(urlErr)
+      ? "That Google account isn't allowed. Sign in with your @siswa.um.edu.my (student) or @um.edu.my (staff) account."
+      : urlErr.replace(/\+/g, " ");
+    history.replaceState(null, "", location.pathname + "#/login");
+  }
+
+  (async () => {
+    try {
+      await loadCatalog();
+      if (sb && !state.user) {
+        const { data } = await sb.auth.getSession();  // also finishes the Google redirect (?code=…)
+        await applySession(data.session);
+      }
+    } catch (e) { console.warn("Startup:", e); }
+    ready = true;
+    let cameFromLogin = false;
+    try { cameFromLogin = sessionStorage.getItem("ip_login") === "1" && !!state.user; if (state.user) sessionStorage.removeItem("ip_login"); } catch { /* ignore */ }
+    if (cameFromLogin) {
+      const dest = state.user.role === "staff" ? "/admin" : state.profile?.skills.length ? "/matches" : "/profile";
+      toast(`Welcome, ${state.user.name.split(" ")[0]}!`);
+      if (location.hash !== "#" + dest) { location.hash = dest; return; }
+    }
+    render();
+    if (sb) sb.auth.onAuthStateChange(evt => {
+      if (evt === "SIGNED_OUT" && live()) { Object.assign(state, { user: null, profile: null, saved: [], clicks: [] }); render(); }
+    });
+  })();
 })();
