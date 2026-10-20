@@ -11,7 +11,7 @@ Static front end (HTML/CSS/JS) + Supabase backend (Postgres, Google sign-in, sch
 Static site, no build step. Import the GitHub repo at vercel.com/new, set Framework Preset to **Other**, click Deploy.
 
 ## One-time setup: Google sign-in
-The database already rejects any sign-up that is not `@siswa.um.edu.my` (student) or `@um.edu.my` (staff). Turn Google on:
+Anyone with a Google account can sign up and becomes a **student**. `@um.edu.my` accounts (and emails in `allowed_emails`) become **staff** and get the reports page. Turn Google on:
 
 1. **Google Cloud Console → APIs & Services → Credentials → Create OAuth client ID** (type *Web application*).
    - Authorized redirect URI: `https://jakdndcmkmwasoxyakhj.supabase.co/auth/v1/callback`
@@ -22,10 +22,10 @@ The database already rejects any sign-up that is not `@siswa.um.edu.my` (student
    - Redirect URLs: add `https://intern-path.vercel.app/**` and `http://localhost:5173/**`
 4. **Authentication → Sign In / Providers → Email**: switch **off** (Google is the only way in).
 
-Allowed domains live in the `allowed_domains` table, e.g. to also allow a lecturer domain:
-`insert into allowed_domains (domain, role) values ('example.edu.my', 'staff');`
+Staff domains live in the `allowed_domains` table; single emails go in `allowed_emails`, e.g. to give someone the reports page:
+`insert into allowed_emails (email, role) values ('name@example.com', 'staff');`
 
-If UM student mail is **not** a Google account, use Supabase's Azure (Microsoft) provider instead and change `provider: "google"` in `app.js`.
+Before sharing publicly, publish the Google OAuth consent screen (Google Cloud → OAuth consent screen → Publish app); in *Testing* mode only listed test users can sign in.
 
 ## What the backend does
 | Piece | What it does |

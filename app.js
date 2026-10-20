@@ -61,7 +61,7 @@
     const { data: row } = await sb.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
     if (!row) {
       await sb.auth.signOut();
-      state.authError = "That account isn't allowed. Sign in with your @siswa.um.edu.my (student) or @um.edu.my (staff) Google account.";
+      state.authError = "Sign-in failed. Please try again with a Google account.";
       return false;
     }
     state.user = { id: row.id, email: row.email, role: row.role, name: row.name || nameFromEmail(row.email), demo: false };
@@ -264,7 +264,7 @@
         <h1>Find the internship that fits your skills — <span class="hl">without opening ten tabs.</span></h1>
         <p class="lead">Intern_Path collects internship offers from Malaysia’s popular job platforms and LinkedIn, reads your CV, and shows your best matches in one place. You apply on the original website.</p>
         <div class="cta-row">
-          <a class="btn btn-primary btn-lg" href="#/login">Get started with your UM email</a>
+          <a class="btn btn-primary btn-lg" href="#/login">Get started with Google</a>
           <button class="btn btn-ghost btn-lg" data-scroll="how">See how it works</button>
         </div>
         <div class="hero-meta"><span>5 job sources</span><span>Skill-based matching</span><span>Malaysians &amp; international students</span></div>
@@ -281,7 +281,7 @@
     <section class="section alt" id="how"><div class="wrap">
       <div class="section-head"><p class="eyebrow">How it works</p><h2>From CV to applications in four steps</h2></div>
       <div class="steps">
-        <div class="step"><h3>Sign in with your UM email</h3><p>Use your <b>@siswa.um.edu.my</b> address. Tell us if you are a Malaysian or an international student.</p></div>
+        <div class="step"><h3>Sign in with Google</h3><p>Any Google account works. Tell us if you are a Malaysian or an international student.</p></div>
         <div class="step"><h3>Add your CV &amp; LinkedIn</h3><p>Upload a PDF. We read it in your browser and pick out your skills — you can edit them.</p></div>
         <div class="step"><h3>We collect &amp; match</h3><p>Offers from JobStreet, LinkedIn, Hiredly, Indeed and Glints are compared with your skills, field, location and languages.</p></div>
         <div class="step"><h3>Open the link &amp; apply</h3><p>See a match score, the skills you have and the ones to learn, then apply on the original site.</p></div>
@@ -323,7 +323,7 @@
   function viewLogin() {
     const ok = canGoogle();
     return `<div class="wrap auth">
-      <section><h1>Sign in</h1><p class="muted">Sign in with your UM Google account. Students use <b>@siswa.um.edu.my</b>; faculty staff use <b>@um.edu.my</b>. Other accounts are not accepted.</p>
+      <section><h1>Sign in</h1><p class="muted">Sign in with any Google account — Malaysian or international students, UM or not. Faculty staff with a <b>@um.edu.my</b> account also get the reports page.</p>
         ${state.authError ? `<div class="note" role="alert" style="margin-top:16px;background:var(--danger-bg);border-color:var(--danger)">${esc(state.authError)}</div>` : ""}
         <div style="margin-top:20px"><button class="btn btn-ghost btn-lg" id="google-btn" ${ok ? "" : "disabled"} style="gap:12px;width:100%;justify-content:center;background:var(--surface)">${GOOGLE_G} Continue with Google</button></div>
         ${ok ? "" : `<p class="hint" style="margin-top:12px">${sb ? "Google sign-in needs the site to be opened from a web address (https:// or http://localhost), not as a local file." : "The sign-in service could not be loaded. Check your internet connection and reload."} Demo accounts below still work.</p>`}
@@ -377,7 +377,7 @@
         <section class="card"><h2>About you</h2><p class="sub">This decides which internships you are eligible for.</p>
           <div class="grid-2">
             <label class="field">Full name<input type="text" name="name" value="${esc(p.name)}" autocomplete="name" required></label>
-            <label class="field">UM email<input type="text" value="${esc(state.user.email)}" disabled></label>
+            <label class="field">Email<input type="text" value="${esc(state.user.email)}" disabled></label>
           </div>
           <fieldset style="border:0;padding:0;margin:18px 0 0"><legend class="hint" style="font-weight:700;margin-bottom:8px;color:var(--text)">I am a…</legend>
             <div class="seg">
@@ -718,11 +718,11 @@
   addEventListener("hashchange", render);
   $("#app").innerHTML = '<div class="wrap"><p class="muted" style="padding:80px 0">Loading…</p></div>';
 
-  // Google sends failures back in the URL (e.g. when the account is not a UM address).
+  // Google sends failures back in the URL .
   const urlErr = new URLSearchParams(location.search).get("error_description") || new URLSearchParams(location.hash.replace(/^#\/?/, "")).get("error_description");
   if (urlErr) {
     state.authError = /database error|not allowed|signup/i.test(urlErr)
-      ? "That Google account isn't allowed. Sign in with your @siswa.um.edu.my (student) or @um.edu.my (staff) account."
+      ? "Sign-in failed. Please try again with a Google account."
       : urlErr.replace(/\+/g, " ");
     history.replaceState(null, "", location.pathname + "#/login");
   }
