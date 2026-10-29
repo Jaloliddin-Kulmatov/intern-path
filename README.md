@@ -1,5 +1,7 @@
 # Intern_Path — by ICOM (WIA2006, OCC 1M)
 
+**Live:** [intern-path-lime.vercel.app](https://intern-path-lime.vercel.app) · **Code:** [github.com/Jaloliddin-Kulmatov/intern-path](https://github.com/Jaloliddin-Kulmatov/intern-path)
+
 Internship matching website for FCSIT students in Malaysia — Malaysian and international.
 Static front end (HTML/CSS/JS) + Supabase backend (Postgres, Google sign-in, scheduled scraper).
 
@@ -18,8 +20,8 @@ Anyone with a Google account can sign up and becomes a **student**. `@um.edu.my`
    - (First time: configure the OAuth consent screen, scopes `email`, `profile`, `openid`.)
 2. **Supabase dashboard → Authentication → Sign In / Providers → Google**: enable it and paste the Client ID and Client Secret.
 3. **Supabase dashboard → Authentication → URL Configuration**:
-   - Site URL: your Vercel URL, e.g. `https://intern-path.vercel.app`
-   - Redirect URLs: add `https://intern-path.vercel.app/**` and `http://localhost:5173/**`
+   - Site URL: your Vercel URL, e.g. `https://intern-path-lime.vercel.app`
+   - Redirect URLs: add `https://intern-path-lime.vercel.app/**` and `http://localhost:5173/**`
 4. **Authentication → Sign In / Providers → Email**: switch **off** (Google is the only way in).
 
 Staff domains live in the `allowed_domains` table; single emails go in `allowed_emails`, e.g. to give someone the reports page:
